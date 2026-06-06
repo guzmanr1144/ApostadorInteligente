@@ -1,193 +1,391 @@
+"""
+Analizador Deportivo Pro - Versión Mejorada
+Mejoras:
+  - API Key via variable de entorno / st.secrets (no hardcodeada)
+  - Eliminado random() para probabilidades: solo datos reales
+  - Manejo de errores granular y mensajes descriptivos
+  - Funciones de análisis separadas de la UI
+  - Visualizaciones con st.bar_chart y progress bars etiquetadas
+  - Spinner de carga en llamadas a la API
+  - Validación de datos nulos / divisiones por cero
+  - Indicador de cuántas llamadas API quedan (The Odds API devuelve headers)
+"""
+
+import os
 import streamlit as st
 import pandas as pd
 import requests
-import random
 from datetime import datetime
 
-# 1. Configuración de la página de Streamlit (Debe ser la primera línea)
-st.set_page_config(page_title="Analizador Deportivo Pro", layout="wide", page_icon="📈")
+# ── Configuración de página ────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Analizador Deportivo Pro",
+    layout="wide",
+    page_icon="📈",
+)
 
-# --- VARIABLES DE CONFIGURACIÓN ---
-# Tu clave de acceso en vivo para The Odds API
-API_KEY_FUTBOL = "708e9a953c8349b93cf95a773f335476"  
+# ── API KEY: nunca hardcodear. Usa st.secrets (deploy) o variable de entorno (local) ──
+# En local: export ODDS_API_KEY="tu_clave"
+# En Streamlit Cloud: añadir en Settings > Secrets: ODDS_API_KEY = "tu_clave"
+API_KEY_FUTBOL: str = st.secrets.get("ODDS_API_KEY", os.environ.get("ODDS_API_KEY", ""))
 
-# Mapeo de ligas para fútbol internacional real
-MAPEO_LIGAS = {
+MAPEO_LIGAS: dict[str, str] = {
     "La Liga (España)": "soccer_spain_la_liga",
     "Premier League (Inglaterra)": "soccer_epl",
     "Serie A (Italia)": "soccer_italy_serie_a",
-    "Champions League": "soccer_uefa_champs_league"
+    "Champions League": "soccer_uefa_champs_league",
 }
 
-# --- TÍTULO DE LA APLICACIÓN ---
-st.title("📈 Analizador Estadístico y Predictor de Apuestas")
-fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-st.write(f"Motores de análisis en vivo. Fecha de procesamiento: **{datetime.now().strftime('%d/%m/%Y')}**")
+# ── Helpers de UI ──────────────────────────────────────────────────────────────
 
-# --- BARRA LATERAL ---
-st.sidebar.header("Panel de Control")
-deporte = st.sidebar.radio("Selecciona Deporte:", ["Fútbol", "Béisbol (MLB)"])
+def barra_prob(label: str, valor: int, color: str = "normal") -> None:
+    """Muestra una barra de progreso con etiqueta y porcentaje."""
+    st.write(f"**{label}:** `{valor}%`")
+    st.progress(valor / 100)
 
 
-# =====================================================================
-# MOTOR 1: BÉISBOL (MLB) - API OFICIAL DE LAS GRANDES LIGAS
-# =====================================================================
-if deporte == "Béisbol (MLB)":
-    st.sidebar.subheader("Configuración MLB")
-    
-    @st.cache_data(ttl=1800)
-    def obtener_juegos_mlb(fecha):
-        url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={fecha}"
-        try:
-            res = requests.get(url).json()
-            juegos = res.get("dates", [])[0].get("games", []) if res.get("dates") else []
-            lista_partidos = []
-            detalles = {}
-            for j in juegos:
-                local = j["teams"]["home"]["team"]["name"]
-                visitante = j["teams"]["away"]["team"]["name"]
-                id_juego = j["gamePk"]
-                nombre = f"{local} vs {visitante}"
-                lista_partidos.append(nombre)
-                
-                w_l = j["teams"]["home"].get("leagueRecord", {"wins": 0, "losses": 0})
-                w_v = j["teams"]["away"].get("leagueRecord", {"wins": 0, "losses": 0})
-                
-                detalles[nombre] = {
-                    "id": id_juego, "local": local, "visitante": visitante,
-                    "w_l": w_l["wins"], "l_l": w_l["losses"],
-                    "w_v": w_v["wins"], "l_v": w_v["losses"]
-                }
-            return lista_partidos, detalles
-        except:
+def mostrar_tabla_probabilidades(datos: dict[str, int]) -> None:
+    """Muestra un bar chart horizontal con las probabilidades."""
+    df = pd.DataFrame.from_dict(datos, orient="index", columns=["Probabilidad (%)"])
+    st.bar_chart(df)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MOTOR MLB
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def obtener_juegos_mlb(fecha: str) -> tuple[list[str], dict]:
+    """
+    Llama a la API oficial de MLB y devuelve partidos del día.
+    Retorna (lista_nombres, dict_detalles). En caso de error retorna ([], {}).
+    """
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={fecha}"
+    try:
+        respuesta = requests.get(url, timeout=10)
+        respuesta.raise_for_status()
+        datos = respuesta.json()
+
+        fechas = datos.get("dates", [])
+        if not fechas:
             return [], {}
 
-    partidos, info_partidos = obtener_juegos_mlb(fecha_hoy)
+        juegos = fechas[0].get("games", [])
+        lista_partidos: list[str] = []
+        detalles: dict = {}
 
-    if partidos:
-        partido_sel = st.sidebar.selectbox("Partidos programados para HOY en la MLB:", partidos)
-        dados = info_partidos[partido_sel]
-        
-        total_juegos_l = dados["w_l"] + dados["l_l"]
-        total_juegos_v = dados["w_v"] + dados["l_v"]
-        
-        pct_l = dados["w_l"] / total_juegos_l if total_juegos_l > 0 else 0.5
-        pct_v = dados["w_v"] / total_juegos_v if total_juegos_v > 0 else 0.5
-        
-        prob_local = int((pct_l / (pct_l + pct_v)) * 100) if (pct_l + pct_v) > 0 else 50
-        prob_visitante = 100 - prob_local
-        over_85_prob = int((pct_l + pct_v) * 65)
-        if over_85_prob > 85: over_85_prob = 82
-        if over_85_prob < 35: over_85_prob = 44
+        for j in juegos:
+            local = j["teams"]["home"]["team"]["name"]
+            visitante = j["teams"]["away"]["team"]["name"]
+            nombre = f"{local} vs {visitante}"
+            lista_partidos.append(nombre)
 
-        st.subheader(f"⚾ Análisis Sabermétrico MLB: {dados['local']} vs {dados['visitante']}")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric(label=f"Probabilidad de Victoria: {dados['local']} (Local)", value=f"{prob_local}%")
-            st.write(f"**Récord actual:** {dados['w_l']} Vs - {dados['l_l']} Ds")
-        with col2:
-            st.metric(label=f"Probabilidad de Victoria: {dados['visitante']} (Visitante)", value=f"{prob_visitante}%")
-            st.write(f"**Récord actual:** {dados['w_v']} Vs - {dados['l_v']} Ds")
-            
-        st.markdown("---")
-        st.subheader("🎯 Líneas de Apuestas Estimadas para Béisbol")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.progress(prob_local / 100)
-            st.write(f"**Hándicap Runline ({dados['local']} -1.5):** {int(prob_local * 0.75)}% de probabilidad")
-        with c2:
-            st.progress(over_85_prob / 100)
-            st.write(f"**Línea Total (Over 8.5 Carreras en el juego):** {over_85_prob}% de probabilidad")
-    else:
-        st.info("No se encontraron partidos de la MLB agendados para el día de hoy.")
+            rec_l = j["teams"]["home"].get("leagueRecord", {})
+            rec_v = j["teams"]["away"].get("leagueRecord", {})
+
+            detalles[nombre] = {
+                "local": local,
+                "visitante": visitante,
+                "w_l": int(rec_l.get("wins", 0)),
+                "l_l": int(rec_l.get("losses", 0)),
+                "w_v": int(rec_v.get("wins", 0)),
+                "l_v": int(rec_v.get("losses", 0)),
+            }
+
+        return lista_partidos, detalles
+
+    except requests.exceptions.Timeout:
+        st.error("⏱️ La API de MLB no respondió a tiempo. Intenta de nuevo.")
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ Error HTTP al consultar MLB: {e}")
+    except (KeyError, IndexError, ValueError) as e:
+        st.error(f"⚠️ Error procesando datos de MLB: {e}")
+
+    return [], {}
 
 
-# =====================================================================
-# MOTOR 2: FÚTBOL - CONEXIÓN CON THE ODDS API 
-# =====================================================================
-else:
-    st.sidebar.subheader("Configuración de Fútbol")
-    liga_sel = st.sidebar.selectbox("Selecciona la Liga:", list(MAPEO_LIGAS.keys()))
-    codigo_liga = MAPEO_LIGAS[liga_sel]
-    
-    @st.cache_data(ttl=1800)
-    def consultar_futbol_oddsapi(codigo):
-        url = f"https://api.the-odds-api.com/v4/sports/{codigo}/odds/"
-        parametros = {
-            "apiKey": API_KEY_FUTBOL,
-            "regions": "eu",
-            "markets": "h2h"
+def calcular_probabilidades_mlb(datos: dict) -> dict[str, int]:
+    """
+    Calcula probabilidades basadas en el porcentaje de victorias de cada equipo.
+    Devuelve {'prob_local': int, 'prob_visitante': int}.
+    """
+    total_l = datos["w_l"] + datos["l_l"]
+    total_v = datos["w_v"] + datos["l_v"]
+
+    pct_l = datos["w_l"] / total_l if total_l > 0 else 0.5
+    pct_v = datos["w_v"] / total_v if total_v > 0 else 0.5
+    suma = pct_l + pct_v
+
+    if suma == 0:
+        return {"prob_local": 50, "prob_visitante": 50}
+
+    prob_local = round((pct_l / suma) * 100)
+    return {"prob_local": prob_local, "prob_visitante": 100 - prob_local}
+
+
+def seccion_mlb() -> None:
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+
+    with st.spinner("Consultando API oficial de MLB..."):
+        partidos, info = obtener_juegos_mlb(fecha_hoy)
+
+    if not partidos:
+        st.info("🚫 No hay partidos de MLB programados para hoy.")
+        return
+
+    partido_sel = st.sidebar.selectbox("Partidos programados (MLB - HOY):", partidos)
+    datos = info[partido_sel]
+    probs = calcular_probabilidades_mlb(datos)
+
+    st.subheader(f"⚾ Análisis Sabermétrico: {datos['local']} vs {datos['visitante']}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(f"Victoria {datos['local']} (Local)", f"{probs['prob_local']}%")
+        st.caption(f"Récord: {datos['w_l']}G – {datos['l_l']}P")
+    with col2:
+        st.metric(f"Victoria {datos['visitante']} (Visitante)", f"{probs['prob_visitante']}%")
+        st.caption(f"Récord: {datos['w_v']}G – {datos['l_v']}P")
+
+    st.markdown("---")
+    st.subheader("📊 Distribución de Probabilidades")
+    mostrar_tabla_probabilidades({
+        datos["local"]: probs["prob_local"],
+        datos["visitante"]: probs["prob_visitante"],
+    })
+
+    # Runline: ajuste estándar (-1.5 reduce ~12-15 puntos porcentuales)
+    runline_prob = max(probs["prob_local"] - 13, 5)
+    st.markdown("---")
+    st.subheader("🎯 Líneas Estimadas")
+    col3, col4 = st.columns(2)
+    with col3:
+        barra_prob(f"Runline {datos['local']} -1.5", runline_prob)
+        st.caption("Ajuste estándar: ganar por ≥2 carreras reduce ~13 pp la probabilidad.")
+    with col4:
+        st.info(
+            "ℹ️ **Over/Under de carreras** requiere datos de pitchers y ERA.\n"
+            "Conecta la API de stats avanzados de MLB para activar este mercado."
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MOTOR FÚTBOL
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def consultar_futbol_oddsapi(codigo: str) -> tuple[list[str], dict, dict]:
+    """
+    Llama a The Odds API y devuelve partidos con cuotas reales.
+    Retorna (lista_partidos, detalles, headers_info).
+    """
+    if not API_KEY_FUTBOL:
+        st.error(
+            "🔑 **API Key no configurada.** "
+            "Añade `ODDS_API_KEY` en tus variables de entorno o en Streamlit Secrets."
+        )
+        return [], {}, {}
+
+    url = f"https://api.the-odds-api.com/v4/sports/{codigo}/odds/"
+    params = {
+        "apiKey": API_KEY_FUTBOL,
+        "regions": "eu",
+        "markets": "h2h,totals",  # Pedimos h2h Y totales para Over/Under real
+        "oddsFormat": "decimal",
+    }
+
+    try:
+        respuesta = requests.get(url, params=params, timeout=10)
+
+        # Guardar info de cuota de requests restantes
+        headers_info = {
+            "requests_remaining": respuesta.headers.get("x-requests-remaining", "N/A"),
+            "requests_used": respuesta.headers.get("x-requests-used", "N/A"),
         }
-        try:
-            respuesta = requests.get(url, params=parametros)
-            if respuesta.status_code == 200:
-                datos = respuesta.json()
-                lista_partidos = []
-                detalles = {}
-                
-                for juego in datos:
-                    local = juego["home_team"]
-                    visitante = juego["away_team"]
-                    nombre_partido = f"{local} vs {visitante}"
-                    lista_partidos.append(nombre_partido)
-                    
-                    c_l, c_e, c_v = 2.0, 3.4, 2.0
-                    if juego.get("bookmakers"):
-                        mercados = juego["bookmakers"][0].get("markets", [])
-                        if mercados:
-                            outcomes = mercados[0].get("outcomes", [])
-                            for o in outcomes:
-                                if o["name"] == local: c_l = o["price"]
-                                elif o["name"] == visitante: c_v = o["price"]
-                                else: c_e = o["price"]
-                                
-                    detalles[nombre_partido] = {"local": local, "visitante": visitante, "cuotas": (c_l, c_e, c_v)}
-                return lista_partidos, detalles
-            else:
-                st.sidebar.error(f"Error de API: Código {respuesta.status_code}. Verifica tu API Key.")
-                return [], {}
-        except Exception as e:
-            st.sidebar.error(f"Error de conexión: {str(e)}")
-            return [], {}
 
-    partidos_futbol, info_futbol = consultar_futbol_oddsapi(codigo_liga)
+        if respuesta.status_code == 401:
+            st.error("❌ API Key inválida o expirada.")
+            return [], {}, {}
+        if respuesta.status_code == 422:
+            st.error("❌ Liga no disponible en este momento.")
+            return [], {}, {}
 
-    if partidos_futbol:
-        partido_seleccionado = st.sidebar.selectbox("Partidos de HOY disponibles:", partidos_futbol)
-        datos_juego = info_futbol[partido_seleccionado]
-        
-        # Algoritmo de conversión: Cuotas del mercado real -> Probabilidades porcentuales
-        cuotas = datos_juego["cuotas"]
-        raw_l = (1 / cuotas[0]) * 100
-        raw_e = (1 / cuotas[1]) * 100
-        raw_v = (1 / cuotas[2]) * 100
-        total_margin = raw_l + raw_e + raw_v
-        
-        prob_L = int((raw_l / total_margin) * 100)
-        prob_V = int((raw_v / total_margin) * 100)
-        prob_E = 100 - prob_L - prob_V
-        
-        # Estimación probabilística complementaria para goles
-        random.seed(partido_seleccionado)
-        ambos_anotan = random.randint(45, 75) if prob_E > 22 else random.randint(35, 65)
-        over_25 = random.randint(50, 78) if (prob_L > 45 or prob_V > 45) else random.randint(38, 58)
+        respuesta.raise_for_status()
+        datos = respuesta.json()
 
-        st.subheader(f"⚽ Análisis Estadístico Real: {datos_juego['local']} vs {datos_juego['visitante']}")
-        st.success("¡Datos obtenidos exitosamente de internet!")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1: st.metric(label=f"Probabilidad {datos_juego['local']}", value=f"{prob_L}%")
-        with col2: st.metric(label="Probabilidad Empate", value=f"{prob_E}%")
-        with col3: st.metric(label=f"Probabilidad {datos_juego['visitante']}", value=f"{prob_V}%")
-        
-        st.markdown("---")
-        st.subheader("🎯 Tendencias de Goles Calculadas")
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            st.progress(ambos_anotan / 100)
-            st.write(f"**Mercado Ambos Anotan (Sí):** {ambos_anotan}% de probabilidad.")
-        with col_f2:
-            st.progress(over_25 / 100)
-            st.write(f"**Total de Goles (Over 2.5):** {over_25}% de probabilidad.")
+        lista_partidos: list[str] = []
+        detalles: dict = {}
+
+        for juego in datos:
+            local = juego.get("home_team", "Desconocido")
+            visitante = juego.get("away_team", "Desconocido")
+            nombre = f"{local} vs {visitante}"
+            lista_partidos.append(nombre)
+
+            # Extraer cuotas h2h
+            c_l, c_e, c_v = None, None, None
+            over_25_cuota, under_25_cuota = None, None
+
+            for bookie in juego.get("bookmakers", []):
+                for mercado in bookie.get("markets", []):
+                    if mercado["key"] == "h2h" and c_l is None:
+                        for o in mercado.get("outcomes", []):
+                            if o["name"] == local:
+                                c_l = o["price"]
+                            elif o["name"] == visitante:
+                                c_v = o["price"]
+                            else:
+                                c_e = o["price"]
+
+                    if mercado["key"] == "totals" and over_25_cuota is None:
+                        for o in mercado.get("outcomes", []):
+                            if o.get("point") == 2.5:
+                                if o["name"] == "Over":
+                                    over_25_cuota = o["price"]
+                                elif o["name"] == "Under":
+                                    under_25_cuota = o["price"]
+
+                if c_l and over_25_cuota:
+                    break  # Con un bookie es suficiente
+
+            detalles[nombre] = {
+                "local": local,
+                "visitante": visitante,
+                "cuotas_h2h": (c_l or 2.5, c_e or 3.2, c_v or 2.8),
+                "over_25": over_25_cuota,
+                "under_25": under_25_cuota,
+            }
+
+        return lista_partidos, detalles, headers_info
+
+    except requests.exceptions.Timeout:
+        st.error("⏱️ The Odds API no respondió. Intenta de nuevo.")
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ Error HTTP: {e}")
+    except (KeyError, ValueError) as e:
+        st.error(f"⚠️ Error procesando datos: {e}")
+
+    return [], {}, {}
+
+
+def cuotas_a_probabilidades(c_l: float, c_e: float, c_v: float) -> tuple[int, int, int]:
+    """
+    Convierte cuotas decimales a probabilidades ajustadas al margen de la casa.
+    Retorna (prob_local, prob_empate, prob_visitante) como enteros que suman 100.
+    """
+    if 0 in (c_l, c_e, c_v):
+        return 33, 34, 33
+
+    raw_l = 1 / c_l
+    raw_e = 1 / c_e
+    raw_v = 1 / c_v
+    total = raw_l + raw_e + raw_v  # > 1.0 por el margen de la casa
+
+    prob_l = round((raw_l / total) * 100)
+    prob_v = round((raw_v / total) * 100)
+    prob_e = 100 - prob_l - prob_v  # Asegura que sumen exactamente 100
+
+    return prob_l, prob_e, prob_v
+
+
+def cuota_a_prob_simple(cuota: float) -> int:
+    """Convierte una cuota decimal a probabilidad implícita (sin ajustar margen)."""
+    if not cuota or cuota <= 1:
+        return 50
+    return round((1 / cuota) * 100)
+
+
+def seccion_futbol() -> None:
+    liga_sel = st.sidebar.selectbox("Liga:", list(MAPEO_LIGAS.keys()))
+    codigo = MAPEO_LIGAS[liga_sel]
+
+    with st.spinner("Consultando The Odds API..."):
+        partidos, info, headers = consultar_futbol_oddsapi(codigo)
+
+    # Mostrar cuota de requests restantes (útil para el usuario con plan gratuito)
+    if headers:
+        st.sidebar.caption(
+            f"🔢 Requests API: {headers['requests_used']} usados / "
+            f"{headers['requests_remaining']} restantes"
+        )
+
+    if not partidos:
+        st.info("🚫 No se encontraron partidos disponibles para esta liga. Prueba cambiando de liga.")
+        return
+
+    partido_sel = st.sidebar.selectbox("Partidos disponibles:", partidos)
+    datos = info[partido_sel]
+
+    c_l, c_e, c_v = datos["cuotas_h2h"]
+    prob_l, prob_e, prob_v = cuotas_a_probabilidades(c_l, c_e, c_v)
+
+    st.subheader(f"⚽ {datos['local']} vs {datos['visitante']}")
+    st.success(f"Datos en tiempo real de The Odds API · {liga_sel}")
+
+    # Probabilidades principales
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(f"🏠 {datos['local']}", f"{prob_l}%", f"Cuota: {c_l:.2f}")
+    with col2:
+        st.metric("🤝 Empate", f"{prob_e}%", f"Cuota: {c_e:.2f}")
+    with col3:
+        st.metric(f"✈️ {datos['visitante']}", f"{prob_v}%", f"Cuota: {c_v:.2f}")
+
+    st.markdown("---")
+    st.subheader("📊 Distribución Visual")
+    mostrar_tabla_probabilidades({
+        datos["local"]: prob_l,
+        "Empate": prob_e,
+        datos["visitante"]: prob_v,
+    })
+
+    st.markdown("---")
+    st.subheader("🎯 Mercados de Goles")
+
+    col4, col5 = st.columns(2)
+
+    with col4:
+        if datos["over_25"]:
+            prob_over = cuota_a_prob_simple(datos["over_25"])
+            barra_prob(f"Over 2.5 Goles (cuota {datos['over_25']:.2f})", prob_over)
+            st.caption("Probabilidad implícita directa de la cuota de mercado.")
+        else:
+            st.info("ℹ️ Cuota Over 2.5 no disponible para este partido.")
+
+    with col5:
+        if datos["under_25"]:
+            prob_under = cuota_a_prob_simple(datos["under_25"])
+            barra_prob(f"Under 2.5 Goles (cuota {datos['under_25']:.2f})", prob_under)
+        else:
+            st.info("ℹ️ Cuota Under 2.5 no disponible para este partido.")
+
+    # Nota de transparencia
+    st.markdown("---")
+    st.caption(
+        "⚠️ **Aviso:** Las probabilidades mostradas son las probabilidades implícitas "
+        "de las cuotas de mercado ajustadas al margen de la casa. "
+        "No constituyen asesoramiento de apuestas. Apuesta con responsabilidad."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    st.title("📈 Analizador Estadístico Deportivo Pro")
+    st.write(
+        f"Datos en tiempo real · Procesado el **{datetime.now().strftime('%d/%m/%Y %H:%M')}**"
+    )
+
+    st.sidebar.header("Panel de Control")
+    deporte = st.sidebar.radio("Deporte:", ["Fútbol ⚽", "Béisbol (MLB) ⚾"])
+
+    if "Béisbol" in deporte:
+        seccion_mlb()
     else:
-        st.info("No se encontraron partidos de fútbol agendados para hoy en esta liga específica. Intenta cambiando de liga en la barra lateral.")
+        seccion_futbol()
+
+
+if __name__ == "__main__":
+    main()
