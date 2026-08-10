@@ -12,17 +12,22 @@ st.set_page_config(
 st.title("📝 Mi Libreta Inteligente de Reuniones")
 st.write("Escribe rápido o graba el audio. La app organizará y corregirá todo para tus reuniones.")
 
-# Configuración de API Key
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    api_key = st.text_input("Ingresa tu Gemini API Key:", type="password")
-    st.markdown("[Consigue tu API Key GRATIS aquí](https://aistudio.google.com/)")
+# 1. Intentar obtener la API Key desde los Secrets de Streamlit
+api_key = None
+if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+
+# 2. Si no está en Secrets, pedirla en la barra lateral
+if not api_key:
+    with st.sidebar:
+        st.header("⚙️ Configuración")
+        api_key = st.text_input("Ingresa tu Gemini API Key:", type="password")
 
 if not api_key:
-    st.info("👋 Para empezar, ingresa tu API Key gratuita de Gemini en la barra lateral.")
+    st.info("👋 Ingresa tu API Key de Gemini en los Secrets de Streamlit o en la barra lateral.")
     st.stop()
 
-# Cliente de Gemini
+# Inicializar el cliente de Gemini
 client = genai.Client(api_key=api_key)
 
 tab1, tab2 = st.tabs(["⌨️ Escribir Notas en Borrador", "🎙️ Escuchar / Grabar Reunión"])
@@ -34,7 +39,7 @@ with tab1:
     raw_notes = st.text_area(
         "Escribe rápido todo lo que necesites anotando en el teclado:",
         height=220,
-        placeholder="Ejemplo: reunios hoy con pedro. se aprueba presupuesto de marketing. maria entrega informe viernes. proxima sesion el martes 10am..."
+        placeholder="Ejemplo: reunion hoy con pedro. se aprueba presupuesto. maria entrega informe el viernes..."
     )
 
     if st.button("✨ Limpiar y Estructurar Notas", key="btn_text"):
@@ -100,7 +105,7 @@ with tab2:
                     Escucha esta reunión y genera un informe profesional estructurado:
                     1. Resumen ejecutivo de los temas hablados.
                     2. Compromisos tomados.
-                    3. Proximos pasos y tareas pendientes.
+                    3. Próximos pasos y tareas pendientes.
                     """
 
                     response = client.models.generate_content(
