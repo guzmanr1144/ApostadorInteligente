@@ -1,265 +1,321 @@
 """
-Mi Libreta Inteligente de Reuniones
-------------------------------------
-App de Streamlit que usa la API de Gemini para:
-  1) Limpiar y estructurar notas escritas a mano/teclado.
-  2) Transcribir y resumir audio de reuniones, con protección
-     anti-alucinación (el modelo no debe inventar contenido).
+Eco de los Gigantes: Misión Paleontológica
+-------------------------------------------
+Juego de estrategia, simulación y gestión de expedición científica por turnos en Streamlit.
+Usa la API de Gemini (gemini-2.5-flash) desde st.secrets["GEMINI_API_KEY"] para la narrativa.
 """
 
-from __future__ import annotations
-
-import logging
-import mimetypes
-import os
-import tempfile
-import time
-from dataclasses import dataclass
-
-import google.genai as genai
+import random
+import pandas as pd
 import streamlit as st
-from google.genai import types as genai_types
+import google.genai as genai
 
 # --------------------------------------------------------------------------
-# Configuración general
+# Configuración inicial de la página
 # --------------------------------------------------------------------------
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-MODEL_NAME = "gemini-2.5-flash"
-MAX_FILE_ACTIVE_WAIT_SECONDS = 60  # tiempo máximo esperando a que Gemini procese el audio
-POLL_INTERVAL_SECONDS = 2
-
-NOTES_PROMPT_TEMPLATE = """\
-Eres un asistente ejecutivo. Toma estas notas rápidas tomadas a toda prisa durante una \
-reunión y transfórmalas en un reporte pulido, sin errores ortográficos y bien estructurado.
-
-Reglas:
-- No inventes información que no esté presente o implícita en las notas originales.
-- Si falta información en alguna sección (por ejemplo, no hay tareas asignadas), indícalo \
-explícitamente en vez de rellenar con contenido genérico.
-
-Notas desordenadas:
-\"\"\"
-{notes}
-\"\"\"
-
-Estructura el resultado con:
-- 📌 **Resumen General**
-- 💡 **Puntos Clave Discutidos**
-- ✅ **Acuerdos Tomados**
-- 📋 **Tareas y Responsables**
-"""
-
-AUDIO_PROMPT = """\
-REGLA DE ORO: Escucha únicamente el audio adjunto. Queda estrictamente PROHIBIDO inventar \
-nombres, temas, acuerdos o detalles que no se escuchen textualmente en la grabación.
-
-Instrucciones:
-1. Si el audio contiene silencio, ruido, música de fondo o no hay voz humana legible, \
-responde ÚNICAMENTE: "⚠️ El audio no contiene una conversación clara o está en silencio."
-2. Si el audio contiene voz legible, realiza lo siguiente basándote 100% en lo que escuchaste:
-   - 📝 **Resumen Fiel:** Describe exactamente de qué se habló.
-   - 💡 **Puntos Clave:** Detalla solo los hechos mencionados.
-   - ✅ **Acuerdos y Tareas:** Lista únicamente lo asignado en el audio (si no se mencionan \
-nombres ni tareas, indica "No se especificaron acuerdos").
-"""
-
+st.set_page_config(
+    page_title="Eco de los Gigantes: Expedición Paleontológica",
+    page_icon="🦴",
+    layout="wide",
+)
 
 # --------------------------------------------------------------------------
-# Utilidades
+# Catálogo de Fósiles y Eventos
 # --------------------------------------------------------------------------
+CATALOGO_FOSILES = {
+    "Valle de los Titanes (Saurópodos y Terópodos)": [
+        {"nombre": "Fémur de Saurópodo Gigante", "prestigio": 300, "valor": 3500, "raro": True},
+        {"nombre": "Diente Serrado de Terópodo Apex", "prestigio": 220, "valor": 2200, "raro": False},
+        {"nombre": "Vértebra Caudal en Concreción", "prestigio": 140, "valor": 1200, "raro": False},
+        {"nombre": "Tronco de Conífera Petrificada", "prestigio": 80, "valor": 600, "raro": False},
+    ],
+    "Cañón de los Pterosaurios (Azhdárquidos y Pterosaurios)": [
+        {"nombre": "Cráneo intacto de Hatzegopteryx", "prestigio": 500, "valor": 6000, "raro": True},
+        {"nombre": "Cresta Ósea con Pigmento de Quetzalcoatlus", "prestigio": 350, "valor": 3200, "raro": True},
+        {"nombre": "Falange Alar con Impresión de Membrana", "prestigio": 210, "valor": 2000, "raro": False},
+        {"nombre": "Hueso Neumático Hueco Fosilizado", "prestigio": 110, "valor": 900, "raro": False},
+    ],
+    "Cuenca del Río Prehistórico (Peces y Ámbar)": [
+        {"nombre": "Nódulo de Ámbar con Insecto Cretácico", "prestigio": 350, "valor": 4000, "raro": True},
+        {"nombre": "Fósil Completo de Pez Celacanto", "prestigio": 240, "valor": 2500, "raro": False},
+        {"nombre": "Losa con Huellas Fosilizadas (Icnitas)", "prestigio": 180, "valor": 1800, "raro": False},
+        {"nombre": "Coprolito Fosilizado con Inclusiones", "prestigio": 90, "valor": 700, "raro": False},
+    ]
+}
 
-@dataclass
-class AudioResult:
-    text: str
+EVENTOS_ALEATORIOS = [
+    {
+        "titulo": "🌪️ Tormenta de Arena Imprevista",
+        "descripcion": "Una violenta ráfaga azotó el campamento base amenazando las carpas de preservación.",
+        "efecto_a": lambda s: (s.update({"presupuesto": max(0, s["presupuesto"] - 400)}), "Gastaste $400 en reforzar la estructura del campamento."),
+        "efecto_b": lambda s: (s.update({"integridad": max(0, s["integridad"] - 15), "moral": max(0, s["moral"] - 10)}), "El equipo y herramientas sufrieron desgastes severos.")
+    },
+    {
+        "titulo": "💧 Escasez de Agua Potable",
+        "descripcion": "Un depósito de agua sufrió una fisura debido al calor extremo del desierto.",
+        "efecto_a": lambda s: (s.update({"presupuesto": max(0, s["presupuesto"] - 600), "raciones": s["raciones"] + 10}), "Compraste suministro de agua de emergencia a un convoy local."),
+        "efecto_b": lambda s: (s.update({"moral": max(0, s["moral"] - 15)}), "La moral del equipo cayó debido a la sed y el racionamiento estricto.")
+    },
+    {
+        "titulo": "🕵️ Exploradores de un Museo Rival",
+        "descripcion": "Una expedición rival intenta excavar en los límites de tu concesión territorial.",
+        "efecto_a": lambda s: (s.update({"presupuesto": s["presupuesto"] + 1000, "prestigio": max(0, s["prestigio"] - 100)}), "Negociaste un pacto financiero, pero cediste exclusividad científica."),
+        "efecto_b": lambda s: (s.update({"prestigio": s["prestigio"] + 100, "raciones": max(0, s["raciones"] - 5)}), "Defendiste legalmente tu territorio y ganaste respeto académico.")
+    },
+    {
+        "titulo": "🚚 Avería del Vehículo Todoterreno",
+        "descripcion": "El eje del camión principal de excavación se rompió transportando rocas pesadas.",
+        "efecto_a": lambda s: (s.update({"presupuesto": max(0, s["presupuesto"] - 800)}), "Contrataste reparación mecánica profesional inmediata."),
+        "efecto_b": lambda s: (s.update({"integridad": max(0, s["integridad"] - 20), "moral": max(0, s["moral"] - 10)}), "La reparación artesanal agotó al personal y dañó herramientas.")
+    }
+]
 
+# --------------------------------------------------------------------------
+# Estado del Juego (Session State)
+# --------------------------------------------------------------------------
+def inicializar_juego():
+    st.session_state["presupuesto"] = 12000
+    st.session_state["raciones"] = 40
+    st.session_state["integridad"] = 100
+    st.session_state["moral"] = 100
+    st.session_state["prestigio"] = 0
+    st.session_state["dia"] = 1
+    st.session_state["max_dias"] = 8
+    st.session_state["fosiles"] = []
+    st.session_state["historial"] = []
+    st.session_state["juego_terminado"] = False
+    st.session_state["cronica"] = "Bienvenido a la expedición. Configura la primera jornada de excavación."
 
-def get_api_key() -> str | None:
-    """Obtiene la API key desde Secrets de Streamlit Cloud o la barra lateral."""
-    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None
+if "presupuesto" not in st.session_state:
+    inicializar_juego()
 
+# --------------------------------------------------------------------------
+# Integración con Gemini AI (Game Master Narrativo vía Secrets)
+# --------------------------------------------------------------------------
+def obtener_api_key() -> str | None:
+    if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+        return st.secrets["GEMINI_API_KEY"]
+    return None
+
+def generar_diario_campo(api_key: str | None, dia: int, zona: str, estrategia: str, hallazgo: str, evento_info: str) -> str:
     if not api_key:
-        with st.sidebar:
-            st.header("⚙️ Configuración")
-            api_key = st.text_input(
-                "Ingresa tu Gemini API Key:",
-                type="password",
-                help="Se recomienda configurarla en Secrets de Streamlit Cloud en lugar de "
-                     "pegarla aquí cada vez.",
-            )
-    return api_key or None
-
-
-@st.cache_resource(show_spinner=False)
-def get_client(api_key: str) -> genai.Client:
-    """Crea (y cachea) el cliente de Gemini para esta API key."""
-    return genai.Client(api_key=api_key)
-
-
-def clean_notes(client: genai.Client, raw_notes: str) -> str:
-    """Envía las notas en bruto al modelo y devuelve el reporte estructurado."""
-    prompt = NOTES_PROMPT_TEMPLATE.format(notes=raw_notes)
-    response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-    return response.text or ""
-
-
-def _guess_suffix(uploaded_file) -> str:
-    """Determina la extensión/mime type correctos del audio subido o grabado."""
-    name = getattr(uploaded_file, "name", None)
-    if name and "." in name:
-        return "." + name.rsplit(".", 1)[-1]
-    # st.audio_input entrega WAV por defecto
-    return ".wav"
-
-
-def _wait_until_active(client: genai.Client, file_obj) -> None:
-    """Espera a que Gemini termine de procesar el archivo de audio subido."""
-    elapsed = 0
-    while file_obj.state.name == "PROCESSING" and elapsed < MAX_FILE_ACTIVE_WAIT_SECONDS:
-        time.sleep(POLL_INTERVAL_SECONDS)
-        elapsed += POLL_INTERVAL_SECONDS
-        file_obj = client.files.get(name=file_obj.name)
-
-    if file_obj.state.name == "FAILED":
-        raise RuntimeError("Gemini no pudo procesar el archivo de audio.")
-    if file_obj.state.name == "PROCESSING":
-        raise TimeoutError("El audio tardó demasiado en procesarse. Intenta con un archivo más corto.")
-
-
-def transcribe_audio(client: genai.Client, selected_audio) -> AudioResult:
-    """Sube el audio a Gemini, espera a que esté listo y genera el análisis."""
-    suffix = _guess_suffix(selected_audio)
-    mime_type, _ = mimetypes.guess_type("audio" + suffix)
-    tmp_path = None
-    gemini_file = None
-
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            tmp_file.write(selected_audio.getvalue())
-            tmp_path = tmp_file.name
-
-        gemini_file = client.files.upload(
-            file=tmp_path,
-            config=genai_types.UploadFileConfig(mime_type=mime_type) if mime_type else None,
+        return (
+            f"📖 **Diario de Campo (Día {dia}):** Hoy excavamos en **{zona}** aplicando la técnica *'{estrategia}'*. "
+            f"\n\n**Incidente de la jornada:** {evento_info} "
+            f"\n\n**Resultado paleontológico:** {hallazgo}"
         )
-        _wait_until_active(client, gemini_file)
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        prompt = f"""
+        Eres el paleontólogo principal y narrador de una expedición científica en el desierto Cretácico.
+        Redacta una entrada emotiva, realista y académica para el Diario de Campo (máximo 100 palabras) sobre la jornada del Día {dia}.
 
+        Contexto del día:
+        - Ubicación: {zona}
+        - Método de trabajo: {estrategia}
+        - Desafío o evento enfrentado: {evento_info}
+        - Hallazgo paleontológico: {hallazgo}
+        - Estado actual: Presupuesto ${st.session_state['presupuesto']}, Raciones {st.session_state['raciones']}, Moral {st.session_state['moral']}%.
+
+        Haz énfasis en la rigurosidad científica, la emoción del descubrimiento y la dureza del entorno.
+        """
         response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[gemini_file, AUDIO_PROMPT],
+            model="gemini-2.5-flash",
+            contents=prompt
         )
-        return AudioResult(text=response.text or "")
-    finally:
-        # Limpieza: archivo temporal local y archivo remoto en Gemini
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        if gemini_file is not None:
-            try:
-                client.files.delete(name=gemini_file.name)
-            except Exception:
-                logger.warning("No se pudo borrar el archivo remoto %s", gemini_file.name)
-
+        return response.text or "Diario registrado con éxito."
+    except Exception as err:
+        return (
+            f"📖 **Diario de Campo (Día {dia}):** Excavación en **{zona}**. "
+            f"\n\n**Resultado:** {hallazgo}. *(Error al conectar con la IA: {err})*"
+        )
 
 # --------------------------------------------------------------------------
-# UI
+# Barra Lateral - Panel de Control & Recursos
 # --------------------------------------------------------------------------
+with st.sidebar:
+    st.title("🏛️ Expedición Cretácica")
+    st.caption("Centro de Mando de Campo")
+    
+    st.subheader("📊 Estado de Recursos")
+    col1, col2 = st.columns(2)
+    col1.metric("💵 Presupuesto", f"${st.session_state['presupuesto']}")
+    col2.metric("🍖 Raciones", f"{st.session_state['raciones']} ud")
+    
+    st.write("**Integridad de Herramientas:**")
+    st.progress(st.session_state["integridad"] / 100)
+    
+    st.write("**Moral del Equipo:**")
+    st.progress(st.session_state["moral"] / 100)
+    
+    st.metric("🏆 Prestigio Científico", f"{st.session_state['prestigio']} pts")
+    st.write(f"📅 **Jornada:** Día {st.session_state['dia']} de {st.session_state['max_dias']}")
 
-def render_notes_tab(client: genai.Client) -> None:
-    st.subheader("Corrección y Orden de Borradores")
+    st.markdown("---")
+    api_key_status = "✅ Gemini Conectado (Secrets)" if obtener_api_key() else "⚠️ Modo Narrativo Estándar"
+    st.caption(f"Estado de IA: {api_key_status}")
 
-    raw_notes = st.text_area(
-        "Escribe rápido todo lo que necesites anotando en el teclado:",
-        height=220,
-        placeholder="Ejemplo: reunion hoy con pedro. se aprueba presupuesto. maria entrega informe el viernes...",
+    if st.button("🔄 Reiniciar Expedición", type="secondary", use_container_width=True):
+        inicializar_juego()
+        st.rerun()
+
+# --------------------------------------------------------------------------
+# Pantalla Principal
+# --------------------------------------------------------------------------
+st.title("🦴 Eco de los Gigantes: Misión Paleontológica")
+st.write("Dirige una expedición científica en busca de fósiles Cretácicos. Administra tus recursos, enfréntate a los desafíos del clima hostil y demuestra tu valor científico al Museo Nacional.")
+
+# Verificar derrota prematura
+if (st.session_state["presupuesto"] <= 0 or st.session_state["raciones"] <= 0 or 
+    st.session_state["integridad"] <= 0 or st.session_state["moral"] <= 0) and not st.session_state["juego_terminado"]:
+    st.session_state["juego_terminado"] = True
+    st.session_state["motivo_derrota"] = "La expedición colapsó por agotamiento extremo de recursos o pérdida total del equipo."
+
+# --- PANTALLA DE JUEGO TERMINADO ---
+if st.session_state["juego_terminado"]:
+    st.markdown("---")
+    if st.session_state.get("motivo_derrota"):
+        st.error(f"❌ **Misión Fracasada:** {st.session_state['motivo_derrota']}")
+    else:
+        st.balloons()
+        st.success("🎉 **¡Expedición Completada con Éxito!**")
+
+    puntos = st.session_state["prestigio"] + (st.session_state["presupuesto"] // 10)
+    st.subheader("📈 Evaluación Científica Final del Museo")
+    
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Puntos de Prestigio", st.session_state["prestigio"])
+    col_b.metric("Fósiles Recolectados", len(st.session_state["fosiles"]))
+    col_c.metric("Puntuación Total", puntos)
+
+    if puntos >= 1200:
+        st.header("🏆 Rango: Medalla de Oro - Doctor Honoris Causa")
+        st.write("¡Tus descubrimientos han reescrito la paleontología! Tu nombre quedará grabado en la historia de la ciencia.")
+    elif puntos >= 700:
+        st.header("🥈 Rango: Medalla de Plata - Expedición Excepcional")
+        st.write("Conseguiste una colección fosilífera de enorme valor y mantuviste a tu equipo a salvo.")
+    else:
+        st.header("🥉 Rango: Medalla de Bronce - Retorno Modesto")
+        st.write("La expedición sobrevivió, pero los hallazgos apenas cubren los gastos operativos del Museo.")
+
+    if st.session_state["fosiles"]:
+        st.subheader("🔍 Catálogo de Fósiles Descubiertos")
+        df_fosiles = pd.DataFrame(st.session_state["fosiles"])
+        st.dataframe(df_fosiles, use_container_width=True)
+
+    if st.button("🚀 Comenzar Nueva Expedición", type="primary"):
+        inicializar_juego()
+        st.rerun()
+
+    st.stop()
+
+# --- PANTALLA DE JUEGO ACTIVO ---
+st.markdown("---")
+st.subheader(f"📍 Planificación de la Jornada - Día {st.session_state['dia']}")
+
+col_main1, col_main2 = st.columns([2, 1])
+
+with col_main1:
+    zona_seleccionada = st.selectbox(
+        "🎯 Elige la zona de excavación para hoy:",
+        list(CATALOGO_FOSILES.keys()),
+        help="Cada yacimiento contiene fósiles característicos con distinto nivel de rareza y valor."
     )
 
-    if st.button("✨ Limpiar y Estructurar Notas", key="btn_text"):
-        if not raw_notes.strip():
-            st.warning("Escribe algo en el borrador antes de procesar.")
+    estrategia = st.radio(
+        "🛠️ Técnica y ritmo de excavación:",
+        [
+            "Excavación Meticulosa con Pincel (Lenta, preserva fósiles raros, consume +3 raciones)",
+            "Excavación Estándar con Cincel (Equilibrada)",
+            "Excavación Mecanizada Intensiva (Rápida, riesgosa para las muestras, -$300)"
+        ]
+    )
+
+    enfoque_campamento = st.selectbox(
+        "🏕️ Tarea del Campamento al atardecer:",
+        [
+            "Racionamiento y Descanso (+10% Moral del equipo, -3 Raciones)",
+            "Mantenimiento de Herramientas (+15% Integridad, -$200)",
+            "Consolidación y Catalogación (+50 Prestigio Científico, -2 Raciones)"
+        ]
+    )
+
+with col_main2:
+    st.info("💡 **Consejo Táctico:** Usa la *Excavación Meticulosa* si buscas piezas de gran valor científico. Asegúrate de hacer mantenimiento antes de que la integridad de tus herramientas caiga a cero.")
+
+# Ejecutar Turno
+if st.button("⛏️ Iniciar Excavación y Avanzar Día", type="primary", use_container_width=True):
+    # 1. Consumo base de recursos diarios
+    st.session_state["raciones"] = max(0, st.session_state["raciones"] - 4)
+    st.session_state["integridad"] = max(0, st.session_state["integridad"] - random.randint(3, 8))
+    
+    # 2. Aplicar Enfoque de Campamento
+    if "Racionamiento" in enfoque_campamento:
+        st.session_state["moral"] = min(100, st.session_state["moral"] + 10)
+        st.session_state["raciones"] = max(0, st.session_state["raciones"] - 3)
+    elif "Mantenimiento" in enfoque_campamento:
+        st.session_state["integridad"] = min(100, st.session_state["integridad"] + 15)
+        st.session_state["presupuesto"] = max(0, st.session_state["presupuesto"] - 200)
+    elif "Consolidación" in enfoque_campamento:
+        st.session_state["prestigio"] += 50
+        st.session_state["raciones"] = max(0, st.session_state["raciones"] - 2)
+
+    if "Meticulosa" in estrategia:
+        st.session_state["raciones"] = max(0, st.session_state["raciones"] - 3)
+    elif "Mecanizada" in estrategia:
+        st.session_state["presupuesto"] = max(0, st.session_state["presupuesto"] - 300)
+
+    # 3. Probabilidad de Hallazgo Fosilífero
+    prob_hallazgo = 0.85 if "Meticulosa" in estrategia else 0.70
+    hallazgo_texto = "No se descubrieron fósiles relevantes hoy."
+    
+    if random.random() < prob_hallazgo:
+        opciones = CATALOGO_FOSILES[zona_seleccionada]
+        if "Meticulosa" in estrategia:
+            fosil_hallado = random.choice(opciones)
         else:
-            with st.spinner("Procesando y corrigiendo tus notas..."):
-                try:
-                    st.session_state["notes_result"] = clean_notes(client, raw_notes)
-                except Exception as exc:
-                    logger.exception("Error al procesar notas")
-                    st.error(f"Error al conectar con la IA: {exc}")
+            fosil_hallado = random.choice([f for f in opciones if not f["raro"]] or opciones)
+            
+        st.session_state["fosiles"].append(fosil_hallado)
+        st.session_state["prestigio"] += fosil_hallado["prestigio"]
+        hallazgo_texto = f"¡DESCUBRIMIENTO! {fosil_hallado['nombre']} (+{fosil_hallado['prestigio']} pts prestigio)."
+        st.toast(f"🦴 {hallazgo_texto}")
 
-    if st.session_state.get("notes_result"):
-        st.success("¡Notas estructuradas con éxito!")
-        st.markdown("---")
-        st.markdown(st.session_state["notes_result"])
-        st.download_button(
-            label="📥 Descargar Acta (.txt)",
-            data=st.session_state["notes_result"],
-            file_name="acta_reunion.txt",
-            mime="text/plain",
-        )
+    # 4. Evento Aleatorio del Día
+    evento = random.choice(EVENTOS_ALEATORIOS)
+    if st.session_state["moral"] > 50 or st.session_state["presupuesto"] > 1000:
+        msg_evento = evento["efecto_a"](st.session_state)[1]
+    else:
+        msg_evento = evento["efecto_b"](st.session_state)[1]
+        
+    evento_desc = f"{evento['titulo']}: {msg_evento}"
 
-
-def render_audio_tab(client: genai.Client) -> None:
-    st.subheader("Transcripción y Resumen de Audio")
-
-    audio_input = st.audio_input("Graba la conversación desde el micrófono:")
-    uploaded_audio = st.file_uploader(
-        "O sube un archivo de audio grabado:", type=["mp3", "wav", "m4a"]
+    # 5. Generar Narrativa con Gemini
+    api_key = obtener_api_key()
+    cronica = generar_diario_campo(
+        api_key, 
+        st.session_state["dia"], 
+        zona_seleccionada, 
+        estrategia, 
+        hallazgo_texto, 
+        evento_desc
     )
+    st.session_state["cronica"] = cronica
 
-    selected_audio = audio_input or uploaded_audio
+    # 6. Avanzar Turno
+    st.session_state["dia"] += 1
+    if st.session_state["dia"] > st.session_state["max_dias"]:
+        st.session_state["juego_terminado"] = True
 
-    if selected_audio:
-        st.audio(selected_audio)
-        if st.button("✨ Procesar Audio de la Reunión", key="btn_audio"):
-            with st.spinner("Escuchando el audio y analizando el contenido real..."):
-                try:
-                    result = transcribe_audio(client, selected_audio)
-                    st.session_state["audio_result"] = result.text
-                except Exception as exc:
-                    logger.exception("Error al procesar audio")
-                    st.error(f"Error al procesar el audio: {exc}")
+    st.rerun()
 
-    if st.session_state.get("audio_result"):
-        st.success("¡Análisis completado!")
-        st.markdown("---")
-        st.markdown(st.session_state["audio_result"])
-        st.download_button(
-            label="📥 Descargar Minuta (.txt)",
-            data=st.session_state["audio_result"],
-            file_name="minuta_audio.txt",
-            mime="text/plain",
-        )
+# --- MOSTRAR DIARIO DE CAMPO ---
+st.markdown("---")
+st.subheader("📖 Diario de Campo e Historial de la Misión")
+st.markdown(st.session_state["cronica"])
 
-
-def main() -> None:
-    st.set_page_config(
-        page_title="Mi Libreta Inteligente de Reuniones",
-        page_icon="📝",
-        layout="wide",
-    )
-
-    st.title("📝 Mi Libreta Inteligente de Reuniones")
-    st.write("Escribe rápido o graba el audio. La app organizará y corregirá todo para tus reuniones.")
-
-    api_key = get_api_key()
-    if not api_key:
-        st.info("👋 Ingresa tu API Key de Gemini en los Secrets de Streamlit o en la barra lateral.")
-        st.stop()
-
-    try:
-        client = get_client(api_key)
-    except Exception as exc:
-        st.error(f"No se pudo inicializar el cliente de Gemini: {exc}")
-        st.stop()
-
-    tab1, tab2 = st.tabs(["⌨️ Escribir Notas en Borrador", "🎙️ Escuchar / Grabar Reunión"])
-
-    with tab1:
-        render_notes_tab(client)
-
-    with tab2:
-        render_audio_tab(client)
-
-
-if __name__ == "__main__":
-    main()
+if st.session_state["fosiles"]:
+    with st.expander("🦴 Muestras Fosilíferas Recolectadas hasta el momento"):
+        df_temp = pd.DataFrame(st.session_state["fosiles"])
+        st.dataframe(df_temp, use_container_width=True)
